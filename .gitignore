@@ -1,0 +1,33 @@
+# ---------- Dependencies and build output ----------
+node_modules/
+dist/
+.aws-sam/
+coverage/
+
+# ---------- Secrets: never commit these ----------
+# Env files (keys, URLs). Only the *.example templates are committed.
+.env
+.env.*
+!.env.example
+# AWS access-key downloads, credentials, private keys
+*.csv
+*.pem
+*.key
+credentials
+.aws/
+
+# ---------- Private project documents ----------
+# The project submission PDF contains team phone numbers and emails.
+*.pdf
+
+# ---------- Logs ----------
+*.log
+npm-debug.log*
+
+# ---------- OS / editor junk ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json

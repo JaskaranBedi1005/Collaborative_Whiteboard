@@ -1,0 +1,16 @@
+# Saved settings for `sam deploy`, so you don't have to answer questions every time.
+version = 0.1
+
+[default.global.parameters]
+stack_name = "collab-whiteboard"
+
+[default.build.parameters]
+cached = true
+
+[default.deploy.parameters]
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+s3_prefix = "collab-whiteboard"
+confirm_changeset = false
+fail_on_empty_changeset = false

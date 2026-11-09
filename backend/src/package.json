@@ -1,0 +1,6 @@
+{
+  "name": "whiteboard-backend",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Lambda functions for the collaborative whiteboard. The AWS SDK is provided by the Lambda runtime, so there are no dependencies to install."
+}
