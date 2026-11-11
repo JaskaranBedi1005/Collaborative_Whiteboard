@@ -41,6 +41,9 @@ export default function Toolbar({
   canUndo,
   onUndo,
   onClear,
+  onSummarize,
+  isSummarizing,
+  cooldownRemaining = 0,
 }) {
   const isCustomColor = !COLORS.includes(color);
 
@@ -115,6 +118,25 @@ export default function Toolbar({
         <button type="button" className="danger" onClick={onClear} title="Clear the board">
           🗑️ Clear
         </button>
+        {onSummarize && (
+          <button
+            type="button"
+            className="summarize-btn"
+            onClick={onSummarize}
+            disabled={isSummarizing || cooldownRemaining > 0}
+            title={
+              cooldownRemaining > 0
+                ? `Please wait ${cooldownRemaining}s before summarizing again`
+                : 'Summarize board with AI'
+            }
+          >
+            {isSummarizing
+              ? '⏳ Summarizing…'
+              : cooldownRemaining > 0
+              ? `✨ Summarize (${cooldownRemaining}s)`
+              : '✨ Summarize'}
+          </button>
+        )}
       </div>
 
       <div className="board-info">

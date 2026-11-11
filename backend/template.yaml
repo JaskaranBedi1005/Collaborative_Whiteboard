@@ -125,6 +125,51 @@ Resources:
       LogGroupName: !Sub /aws/lambda/${DrawFunction}
       RetentionInDays: 7
 
+  SummarizeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: summarize.handler
+      Timeout: 30
+      Environment:
+        Variables:
+          GEMINI_KEY_PARAM: /whiteboard/gemini-api-key
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ssm:GetParameter
+                - ssm:GetParameters
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/whiteboard/gemini-api-key
+      Events:
+        SummarizePost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /summarize
+            Method: post
+        SummarizeOptions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /summarize
+            Method: options
+
+  SummarizeLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SummarizeFunction}
+      RetentionInDays: 7
+
+  # ---------------------------------------------------------------- REST API for AI Summary
+  RestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors:
+        AllowMethods: "'POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+        AllowOrigin: "'*'"
+
   # ---------------------------------------------------------------- WebSocket API
   WebSocketApi:
     Type: AWS::ApiGatewayV2::Api
@@ -223,59 +268,56 @@ Resources:
   FrontendBucket:
     Type: AWS::S3::Bucket
     Properties:
-      # Keep public access completely blocked (private bucket)
+      # Private bucket - CloudFront accesses it via OAC (no public website hosting)
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
 
-  CloudFrontOAC:
+  # Origin Access Control - lets CloudFront fetch from the private S3 bucket
+  FrontendOAC:
     Type: AWS::CloudFront::OriginAccessControl
     Properties:
       OriginAccessControlConfig:
-        Name: !Sub ${AWS::StackName}-frontend-oac
+        Name: !Sub ${AWS::StackName}-oac
         OriginAccessControlOriginType: s3
         SigningBehavior: always
         SigningProtocol: sigv4
 
+  # CloudFront distribution - HTTPS, global CDN, SPA routing
   FrontendDistribution:
     Type: AWS::CloudFront::Distribution
     Properties:
       DistributionConfig:
         Enabled: true
         DefaultRootObject: index.html
-        Comment: !Sub ${AWS::StackName} frontend distribution
-        PriceClass: PriceClass_100
+        HttpVersion: http2
         Origins:
-          - Id: FrontendS3Origin
+          - Id: S3Origin
             DomainName: !GetAtt FrontendBucket.RegionalDomainName
-            OriginAccessControlId: !Ref CloudFrontOAC
-            S3OriginConfig:
-              OriginAccessIdentity: ''
+            OriginAccessControlId: !Ref FrontendOAC
+            S3OriginConfig: {}   # Required placeholder when using OAC
         DefaultCacheBehavior:
-          TargetOriginId: FrontendS3Origin
+          TargetOriginId: S3Origin
           ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6   # CachingOptimized (AWS managed)
           AllowedMethods: [GET, HEAD, OPTIONS]
-          CachedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
           Compress: true
-          # AWS Managed Cache Policy: CachingOptimized
-          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        # SPA fallback: return index.html for any 403/404 so React Router handles the path
         CustomErrorResponses:
-          # Support client-side SPA routing (index.html handles query params like ?board=xyz)
           - ErrorCode: 403
             ResponseCode: 200
             ResponsePagePath: /index.html
-            ErrorCachingMinTTL: 10
+            ErrorCachingMinTTL: 0
           - ErrorCode: 404
             ResponseCode: 200
             ResponsePagePath: /index.html
-            ErrorCachingMinTTL: 10
+            ErrorCachingMinTTL: 0
+        PriceClass: PriceClass_100   # US + Europe + Asia edges (cheapest; free tier covers this)
 
+  # Allow CloudFront OAC to read objects from the private bucket
   FrontendBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -283,7 +325,7 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: AllowCloudFrontServicePrincipalReadOnly
+          - Sid: AllowCloudFrontServicePrincipal
             Effect: Allow
             Principal:
               Service: cloudfront.amazonaws.com
@@ -298,11 +340,14 @@ Outputs:
     Description: Put this in frontend/.env.local as VITE_WS_URL
     Value: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod
   FrontendBucketName:
-    Description: S3 bucket name to upload the frontend build files
+    Description: "S3 bucket name - upload with: aws s3 sync dist s3://<FrontendBucketName> --delete"
     Value: !Ref FrontendBucket
-  CloudFrontDistributionId:
-    Description: CloudFront distribution ID (for cache invalidation)
-    Value: !Ref FrontendDistribution
-  WebsiteUrl:
-    Description: Public URL for the whiteboard frontend
+  CloudFrontUrl:
+    Description: Public HTTPS URL for the whiteboard (via CloudFront CDN)
     Value: !Sub https://${FrontendDistribution.DomainName}
+  CloudFrontDistributionId:
+    Description: Use for cache invalidation after deployments
+    Value: !Ref FrontendDistribution
+  SummarizeApiUrl:
+    Description: Put this in frontend/.env.local as VITE_SUMMARIZE_URL
+    Value: !Sub https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/summarize

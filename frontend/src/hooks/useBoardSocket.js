@@ -5,6 +5,20 @@ const WS_URL = import.meta.env.VITE_WS_URL;
 
 const MAX_RETRY_DELAY_MS = 15000;
 
+// crypto.randomUUID() requires a secure context (HTTPS).
+// This fallback works over plain HTTP (e.g. S3 static website hosting).
+function generateUUID() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  // RFC-4122 v4 fallback using Math.random()
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 // Keeps one WebSocket open to AWS for the given board and reconnects
 // automatically if it drops (AWS closes idle connections after 10 minutes).
 //
@@ -27,7 +41,7 @@ export function useBoardSocket(boardId, onMessage) {
 
     function connect() {
       const socket = new WebSocket(`${WS_URL}?board=${encodeURIComponent(boardId)}`);
-      const loadRequestId = crypto.randomUUID();
+      const loadRequestId = generateUUID();
       const loadChunks = [];
       const receivedChunkIndexes = new Set();
       let loadChunkCount;
