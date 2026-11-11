@@ -5,16 +5,19 @@ Description: Serverless real-time collaborative whiteboard - WebSocket backend
 # Cost notes (keep this project at $0):
 # - DynamoDB uses PROVISIONED capacity. AWS gives 25 read + 25 write units free
 #   forever per region, counting tables AND indexes. Budget so far:
-#     ConnectionsTable 5/5 + byBoard index 5/5 = 10/10  (BoardState later: 10/10)
+#     ConnectionsTable 5/5 + byBoard index 5/5 = 10/10
+#     BoardState 10/10 = 20/20 total
 # - Lambda: 1M requests/month always free.
 # - Logs are kept 7 days only.
+# - S3: 5 GB standard storage free for 12 months (frontend build is <1 MB).
+# - CloudFront: 1 TB data transfer out/month and 10M requests/month always free.
 
 Globals:
   Function:
     Runtime: nodejs22.x
     Architectures: [arm64]
     MemorySize: 256
-    Timeout: 10
+    Timeout: 30
     CodeUri: src/
     Environment:
       Variables:
@@ -51,6 +54,25 @@ Resources:
         AttributeName: expiresAt
         Enabled: true
 
+  # Store one item per stroke; use a timestamp-first strokeId for drawing order.
+  BoardState:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 10
+        WriteCapacityUnits: 10
+      AttributeDefinitions:
+        - AttributeName: boardId
+          AttributeType: S
+        - AttributeName: strokeId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: boardId
+          KeyType: HASH
+        - AttributeName: strokeId
+          KeyType: RANGE
+
   # ---------------------------------------------------------------- Lambdas
   ConnectFunction:
     Type: AWS::Serverless::Function
@@ -72,9 +94,14 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       Handler: draw.handler
+      Environment:
+        Variables:
+          BOARD_STATE_TABLE: !Ref BoardState
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref ConnectionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BoardState
         - Statement:
             - Effect: Allow
               Action: execute-api:ManageConnections
@@ -192,7 +219,90 @@ Resources:
         ThrottlingBurstLimit: 100
         ThrottlingRateLimit: 50
 
+  # ---------------------------------------------------------------- Frontend Hosting (S3 + CloudFront with OAC)
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # Keep public access completely blocked (private bucket)
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-frontend-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Comment: !Sub ${AWS::StackName} frontend distribution
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: FrontendS3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref CloudFrontOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          Compress: true
+          # AWS Managed Cache Policy: CachingOptimized
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CustomErrorResponses:
+          # Support client-side SPA routing (index.html handles query params like ?board=xyz)
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipalReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub arn:${AWS::Partition}:s3:::${FrontendBucket}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}
+
 Outputs:
   WebSocketUrl:
     Description: Put this in frontend/.env.local as VITE_WS_URL
     Value: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+  FrontendBucketName:
+    Description: S3 bucket name to upload the frontend build files
+    Value: !Ref FrontendBucket
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID (for cache invalidation)
+    Value: !Ref FrontendDistribution
+  WebsiteUrl:
+    Description: Public URL for the whiteboard frontend
+    Value: !Sub https://${FrontendDistribution.DomainName}

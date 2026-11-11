@@ -8,8 +8,8 @@ Several people open the same link, draw on one canvas, and see each other's line
 | --- | --- | --- |
 | 1 | Whiteboard in the browser: pen, eraser, colours, size, undo, clear | Done |
 | 2 | Live drawing between users over a WebSocket | Backend deployed and tested |
-| 3 | Boards saved in DynamoDB and restored on join/refresh | Next |
-| 4 | Public hosting on S3 + CloudFront | Planned |
+| 3 | Boards saved in DynamoDB and restored on join/refresh | Done |
+| 4 | Public hosting on S3 + CloudFront with OAC | Configured in template |
 | 5 | "Summarize" button using the Gemini API | Planned |
 | 6 | Polish, demo video | Planned |
 
@@ -81,8 +81,17 @@ aws configure                   # region us-east-1
 cd backend
 sam validate --lint
 sam build
-sam deploy                      # prints WebSocketUrl under Outputs
+sam deploy                      # prints WebSocketUrl, FrontendBucketName, and WebsiteUrl under Outputs
 node --experimental-websocket scripts/test-websocket.mjs <WebSocketUrl>   # flag only needed on Node 20
+```
+
+## Deploy the frontend (S3 + CloudFront)
+
+```bash
+cd frontend
+npm run build                   # builds production assets to frontend/dist
+aws s3 sync dist s3://<FrontendBucketName> --delete
+aws cloudfront create-invalidation --distribution-id <CloudFrontDistributionId> --paths "/*"
 ```
 
 The account must be standalone or allow Lambda, DynamoDB and CloudFormation. An AWS Organizations service control policy can block deploys.
@@ -98,4 +107,3 @@ The account must be standalone or allow Lambda, DynamoDB and CloudFormation. An 
 - Positions are in screen pixels, so drawings near the edge of a large screen may fall outside a smaller one.
 - The eraser paints the white background colour.
 - No login: anyone with a board link can draw on and clear that board.
-- Boards are not saved yet (Phase 3).

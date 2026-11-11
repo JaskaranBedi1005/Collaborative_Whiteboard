@@ -1,11 +1,13 @@
-// Everything that touches the Connections table lives here.
+// DynamoDB helpers for connection membership and persisted board strokes.
 //
 // Table: one row per open browser tab
 //   connectionId (key) | boardId | connectedAt | expiresAt
-// Index "byBoard": lets us ask "which connections are on board X?" quickly.
+// Connections index "byBoard": lets us ask "which connections are on board X?".
+// BoardState stores one item per stroke, keyed by its timestamp-first ID.
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
+  BatchWriteCommand,
   DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
@@ -15,6 +17,7 @@ import {
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const TABLE = process.env.CONNECTIONS_TABLE;
+const BOARD_STATE_TABLE = process.env.BOARD_STATE_TABLE;
 
 export const BOARD_ID_PATTERN = /^[a-zA-Z0-9_-]{1,40}$/;
 
@@ -83,4 +86,83 @@ export async function getBoardConnections(boardId) {
 
   boardMembers.set(boardId, { ids, expires: Date.now() + BOARD_MEMBERS_CACHE_MS });
   return ids;
+}
+
+export async function saveStroke(boardId, stroke) {
+  await ddb.send(
+    new PutCommand({
+      TableName: BOARD_STATE_TABLE,
+      Item: { boardId, strokeId: stroke.id, stroke },
+    }),
+  );
+}
+
+export async function getBoardStrokes(boardId) {
+  const strokes = [];
+  let ExclusiveStartKey;
+  do {
+    const page = await ddb.send(
+      new QueryCommand({
+        TableName: BOARD_STATE_TABLE,
+        KeyConditionExpression: 'boardId = :boardId',
+        ExpressionAttributeValues: { ':boardId': boardId },
+        ProjectionExpression: 'stroke',
+        ConsistentRead: true,
+        ExclusiveStartKey,
+      }),
+    );
+    for (const item of page.Items ?? []) strokes.push(item.stroke);
+    ExclusiveStartKey = page.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return strokes;
+}
+
+export async function removeStroke(boardId, strokeId) {
+  await ddb.send(
+    new DeleteCommand({
+      TableName: BOARD_STATE_TABLE,
+      Key: { boardId, strokeId },
+    }),
+  );
+}
+
+async function deleteStrokeBatch(requests) {
+  let pending = requests;
+  for (let attempt = 0; pending.length > 0 && attempt < 6; attempt += 1) {
+    const result = await ddb.send(
+      new BatchWriteCommand({
+        RequestItems: { [BOARD_STATE_TABLE]: pending },
+      }),
+    );
+    pending = result.UnprocessedItems?.[BOARD_STATE_TABLE] ?? [];
+    if (pending.length > 0 && attempt < 5) {
+      await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** attempt));
+    }
+  }
+  if (pending.length > 0) {
+    throw new Error(`Failed to delete ${pending.length} board strokes after retries`);
+  }
+}
+
+export async function clearBoardStrokes(boardId) {
+  let ExclusiveStartKey;
+  do {
+    const page = await ddb.send(
+      new QueryCommand({
+        TableName: BOARD_STATE_TABLE,
+        KeyConditionExpression: 'boardId = :boardId',
+        ExpressionAttributeValues: { ':boardId': boardId },
+        ProjectionExpression: 'boardId, strokeId',
+        ExclusiveStartKey,
+      }),
+    );
+    const items = page.Items ?? [];
+    for (let offset = 0; offset < items.length; offset += 25) {
+      const requests = items.slice(offset, offset + 25).map((item) => ({
+        DeleteRequest: { Key: { boardId: item.boardId, strokeId: item.strokeId } },
+      }));
+      await deleteStrokeBatch(requests);
+    }
+    ExclusiveStartKey = page.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
 }

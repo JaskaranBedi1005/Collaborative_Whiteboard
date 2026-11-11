@@ -27,11 +27,17 @@ export function useBoardSocket(boardId, onMessage) {
 
     function connect() {
       const socket = new WebSocket(`${WS_URL}?board=${encodeURIComponent(boardId)}`);
+      const loadRequestId = crypto.randomUUID();
+      const loadChunks = [];
+      const receivedChunkIndexes = new Set();
+      let loadChunkCount;
+      let loadBoardComplete = false;
       socketRef.current = socket;
 
       socket.onopen = () => {
         attempt = 0;
         setStatus('online');
+        socket.send(JSON.stringify({ action: 'draw', type: 'loadBoard', requestId: loadRequestId }));
       };
 
       socket.onmessage = (event) => {
@@ -40,6 +46,31 @@ export function useBoardSocket(boardId, onMessage) {
           message = JSON.parse(event.data);
         } catch {
           return; // ignore anything that isn't JSON
+        }
+        if (message.type === 'loadBoardChunk') {
+          if (
+            loadBoardComplete ||
+            message.requestId !== loadRequestId ||
+            !Number.isInteger(message.chunkIndex) ||
+            !Number.isInteger(message.chunkCount) ||
+            message.chunkCount < 1 ||
+            message.chunkIndex < 0 ||
+            message.chunkIndex >= message.chunkCount ||
+            !Array.isArray(message.strokes)
+          ) {
+            return;
+          }
+          if (loadChunkCount !== undefined && loadChunkCount !== message.chunkCount) return;
+          loadChunkCount = message.chunkCount;
+          if (!receivedChunkIndexes.has(message.chunkIndex)) {
+            loadChunks[message.chunkIndex] = message.strokes;
+            receivedChunkIndexes.add(message.chunkIndex);
+          }
+          if (receivedChunkIndexes.size === loadChunkCount) {
+            loadBoardComplete = true;
+            onMessageRef.current({ type: 'loadBoard', strokes: loadChunks.flat() });
+          }
+          return;
         }
         onMessageRef.current(message);
       };

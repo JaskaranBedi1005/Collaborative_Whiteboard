@@ -27,6 +27,24 @@ export function useBoard(boardId) {
 
   const handleMessage = useCallback((message) => {
     switch (message.type) {
+      case 'loadBoard': {
+        const loadedStrokes = Array.isArray(message.strokes) ? message.strokes : [];
+        const savedStrokes = loadedStrokes.filter(
+          (stroke) => stroke?.id && !removedIds.current.has(stroke.id),
+        );
+        for (const stroke of savedStrokes) closedIds.current.add(stroke.id);
+        setStrokes((prev) => {
+          const strokesById = new Map(savedStrokes.map((stroke) => [stroke.id, stroke]));
+          for (const stroke of prev) {
+            if (stroke?.id && !removedIds.current.has(stroke.id)) {
+              strokesById.set(stroke.id, stroke);
+            }
+          }
+          return [...strokesById.values()].sort((a, b) => a.id.localeCompare(b.id));
+        });
+        setRemoteLive({});
+        break;
+      }
       case 'progress': {
         const { stroke, from, points } = message;
         if (!stroke?.id || !Array.isArray(points) || closedIds.current.has(stroke.id)) return;
