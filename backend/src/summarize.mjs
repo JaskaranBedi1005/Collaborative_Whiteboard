@@ -91,55 +91,82 @@ export async function handler(event) {
     base64Data = match[2];
   }
 
-  try {
-    const apiKey = await getGeminiApiKey();
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  // Models tried in order. On 429 (quota) or 503 (overload) the next is tried.
+  const MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.5-flash'];
+  // 404 included so deprecated/removed models are automatically skipped
+  const FALLBACK_ON = new Set([404, 429, 503, 500]);
 
-    const promptText =
-      'You are analyzing a collaborative whiteboard drawing. ' +
-      'Provide a concise, clear description and summary of what is drawn on this board. ' +
-      'Highlight any text, diagrams, shapes, or diagrams present and explain what they represent. ' +
-      'Keep your response friendly, clear, and structured.';
+  const promptText =
+    'You are analyzing a collaborative whiteboard drawing. ' +
+    'Provide a concise, clear description and summary of what is drawn on this board. ' +
+    'Highlight any text, diagrams, shapes, or diagrams present and explain what they represent. ' +
+    'Keep your response friendly, clear, and structured.';
 
-    const response = await fetch(geminiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [
+  const requestBody = JSON.stringify({
+    contents: [
+      {
+        parts: [
+          { text: promptText },
           {
-            parts: [
-              { text: promptText },
-              {
-                inline_data: {
-                  mime_type: mimeType,
-                  data: base64Data,
-                },
-              },
-            ],
+            inline_data: {
+              mime_type: mimeType,
+              data: base64Data,
+            },
           },
         ],
-      }),
-    });
+      },
+    ],
+  });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error('Gemini API error:', response.status, errText);
-      return {
-        statusCode: response.status,
-        headers: CORS_HEADERS,
-        body: JSON.stringify({ error: 'Gemini API call failed', details: errText }),
-      };
+  try {
+    const apiKey = await getGeminiApiKey();
+    let lastStatus = 500;
+    let lastErrText = '';
+
+    for (const model of MODELS) {
+      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      let response;
+      try {
+        response = await fetch(geminiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: requestBody,
+        });
+      } catch (fetchErr) {
+        // Network-level error — try next model
+        console.error(`Fetch error for model ${model}:`, fetchErr.message);
+        lastErrText = fetchErr.message;
+        continue;
+      }
+
+      if (response.ok) {
+        const data = await response.json();
+        const summary =
+          data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
+          'No description could be generated from this image.';
+        if (model !== MODELS[0]) {
+          console.log(`Used fallback model: ${model}`);
+        }
+        return {
+          statusCode: 200,
+          headers: CORS_HEADERS,
+          body: JSON.stringify({ summary }),
+        };
+      }
+
+      lastStatus = response.status;
+      lastErrText = await response.text();
+      console.error(`Gemini API error on model ${model}:`, lastStatus, lastErrText);
+
+      // Only fall through to the next model for retriable errors
+      if (!FALLBACK_ON.has(lastStatus)) break;
     }
 
-    const data = await response.json();
-    const summary =
-      data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
-      'No description could be generated from this image.';
-
+    // All models failed (or a non-retriable error stopped us early)
     return {
-      statusCode: 200,
+      statusCode: lastStatus,
       headers: CORS_HEADERS,
-      body: JSON.stringify({ summary }),
+      body: JSON.stringify({ error: 'Gemini API call failed', details: lastErrText }),
     };
   } catch (err) {
     console.error('Summarize error:', err);
