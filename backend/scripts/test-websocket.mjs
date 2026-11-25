@@ -43,6 +43,24 @@ check('B (same board) received the stroke', b.received.some((m) => m.stroke?.id 
 check('C (other board) received nothing', c.received.length === 0);
 check('A (sender) did not get its own stroke back', a.received.length === 0);
 
+// Asking for the board returns the saved stroke and announces the online count.
+a.send(JSON.stringify({ action: 'draw', type: 'loadBoard', requestId: `req-${run}` }));
+await sleep(3000);
+const loaded = a.received.filter((m) => m.type === 'loadBoardChunk').flatMap((m) => m.strokes);
+check('loadBoard returns the saved stroke', loaded.some((s) => s?.id === stroke.id));
+const lastCount = (socket) => socket.received.filter((m) => m.type === 'presence').at(-1)?.count;
+check('A sees 2 people online', lastCount(a) === 2);
+check('B sees 2 people online', lastCount(b) === 2);
+check('C (other board) got no presence update', lastCount(c) === undefined);
+
+// Clean up the test stroke, then check the count drops when B leaves.
+// API Gateway delivers $disconnect on a best-effort basis (usually well under
+// a second, slower on a cold start), so wait up to 10 s instead of a fixed time.
+a.send(JSON.stringify({ action: 'draw', type: 'clear' }));
+b.close();
+for (let waited = 0; lastCount(a) !== 1 && waited < 10000; waited += 250) await sleep(250);
+check('A sees 1 person online after B leaves', lastCount(a) === 1);
+
 let rejected = false;
 try {
   const bad = await open('not a valid board!');
@@ -52,7 +70,7 @@ try {
 }
 check('invalid board name is refused', rejected);
 
-for (const socket of [a, b, c]) socket.close();
+for (const socket of [a, c]) socket.close();
 await sleep(500);
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) failed.`);

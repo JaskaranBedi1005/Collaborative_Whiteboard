@@ -8,10 +8,21 @@ Several people open the same link, draw on one canvas, and see each other's line
 | --- | --- | --- |
 | 1 | Whiteboard in the browser: pen, eraser, colours, size, undo, clear | Done |
 | 2 | Live drawing between users over a WebSocket | Backend deployed and tested |
-| 3 | Boards saved in DynamoDB and restored on join/refresh | Next |
-| 4 | Public hosting on S3 + CloudFront | Planned |
-| 5 | "Summarize" button using the Gemini API | Planned |
-| 6 | Polish, demo video | Planned |
+| 3 | Boards saved in DynamoDB and restored on join/refresh | Done |
+| 4 | Public hosting on S3 + CloudFront with OAC | Deployed |
+| 5 | "Summarize" button using the Gemini API | Deployed |
+| 6 | Online count, 30-day stroke expiry, redesigned UI, demo video | In progress (demo video to do) |
+
+Phase 6 adds:
+
+- **Who's online:** the server broadcasts `{type: "presence", count}` to a board whenever someone joins (on `loadBoard`) or leaves (`$disconnect`).
+- **Storage cleanup:** each saved stroke carries an `expiresAt` and DynamoDB TTL deletes it 30 days after it was drawn.
+- **UI:** full-screen dot-grid board, floating top bar and tool dock, icon buttons with tooltips, confirm dialog for Clear, toast on Share, empty-board hint. The eraser now cuts through ink instead of painting white.
+- **Names while drawing:** a welcome box asks for a display name on the first visit (or continue as a guest, e.g. "Swift Otter"). The name is sent with live `progress` messages, so others see a tag in the drawer's colour at the tip of the line while it is being drawn. It is never saved with the line. Click your initials in the top bar to change it. This is a display name, not an account.
+- **Laser pointer:** a glowing red trail that fades after 1.5 s, for pointing while you talk. It is sent as live `progress` messages only, so the server forwards it but never saves it.
+- **AI summary panel:** the summary opens beside the board, with Copy and Summarize again.
+- **Dark mode:** follows the system setting until you pick one with the sun/moon button (remembered in the browser). Saved colours never change; near-black lines are drawn light on the dark board, and near-white lines dark on the light board, so everyone can read every board. The AI snapshot uses the current board background.
+- **Shortcuts:** `P` pen, `E` eraser, `L` laser, `[` / `]` brush size, `Ctrl+Z` undo, `Esc` closes the summary.
 
 ## How it works
 
@@ -81,8 +92,17 @@ aws configure                   # region us-east-1
 cd backend
 sam validate --lint
 sam build
-sam deploy                      # prints WebSocketUrl under Outputs
+sam deploy                      # prints WebSocketUrl, FrontendBucketName, and WebsiteUrl under Outputs
 node --experimental-websocket scripts/test-websocket.mjs <WebSocketUrl>   # flag only needed on Node 20
+```
+
+## Deploy the frontend (S3 + CloudFront)
+
+```bash
+cd frontend
+npm run build                   # builds production assets to frontend/dist
+aws s3 sync dist s3://<FrontendBucketName> --delete
+aws cloudfront create-invalidation --distribution-id <CloudFrontDistributionId> --paths "/*"
 ```
 
 The account must be standalone or allow Lambda, DynamoDB and CloudFormation. An AWS Organizations service control policy can block deploys.
@@ -98,4 +118,3 @@ The account must be standalone or allow Lambda, DynamoDB and CloudFormation. An 
 - Positions are in screen pixels, so drawings near the edge of a large screen may fall outside a smaller one.
 - The eraser paints the white background colour.
 - No login: anyone with a board link can draw on and clear that board.
-- Boards are not saved yet (Phase 3).

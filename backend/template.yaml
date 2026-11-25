@@ -5,16 +5,19 @@ Description: Serverless real-time collaborative whiteboard - WebSocket backend
 # Cost notes (keep this project at $0):
 # - DynamoDB uses PROVISIONED capacity. AWS gives 25 read + 25 write units free
 #   forever per region, counting tables AND indexes. Budget so far:
-#     ConnectionsTable 5/5 + byBoard index 5/5 = 10/10  (BoardState later: 10/10)
+#     ConnectionsTable 5/5 + byBoard index 5/5 = 10/10
+#     BoardState 10/10 = 20/20 total
 # - Lambda: 1M requests/month always free.
 # - Logs are kept 7 days only.
+# - S3: 5 GB standard storage free for 12 months (frontend build is <1 MB).
+# - CloudFront: 1 TB data transfer out/month and 10M requests/month always free.
 
 Globals:
   Function:
     Runtime: nodejs22.x
     Architectures: [arm64]
     MemorySize: 256
-    Timeout: 10
+    Timeout: 30
     CodeUri: src/
     Environment:
       Variables:
@@ -51,6 +54,29 @@ Resources:
         AttributeName: expiresAt
         Enabled: true
 
+  # Store one item per stroke; use a timestamp-first strokeId for drawing order.
+  BoardState:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 10
+        WriteCapacityUnits: 10
+      AttributeDefinitions:
+        - AttributeName: boardId
+          AttributeType: S
+        - AttributeName: strokeId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: boardId
+          KeyType: HASH
+        - AttributeName: strokeId
+          KeyType: RANGE
+      # Strokes delete themselves 30 days after they were drawn (free).
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
   # ---------------------------------------------------------------- Lambdas
   ConnectFunction:
     Type: AWS::Serverless::Function
@@ -67,14 +93,24 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref ConnectionsTable
+        # Tells the rest of the board the new online count.
+        - Statement:
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*
 
   DrawFunction:
     Type: AWS::Serverless::Function
     Properties:
       Handler: draw.handler
+      Environment:
+        Variables:
+          BOARD_STATE_TABLE: !Ref BoardState
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref ConnectionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BoardState
         - Statement:
             - Effect: Allow
               Action: execute-api:ManageConnections
@@ -97,6 +133,51 @@ Resources:
     Properties:
       LogGroupName: !Sub /aws/lambda/${DrawFunction}
       RetentionInDays: 7
+
+  SummarizeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: summarize.handler
+      Timeout: 30
+      Environment:
+        Variables:
+          GEMINI_KEY_PARAM: /whiteboard/gemini-api-key
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ssm:GetParameter
+                - ssm:GetParameters
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/whiteboard/gemini-api-key
+      Events:
+        SummarizePost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /summarize
+            Method: post
+        SummarizeOptions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /summarize
+            Method: options
+
+  SummarizeLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SummarizeFunction}
+      RetentionInDays: 7
+
+  # ---------------------------------------------------------------- REST API for AI Summary
+  RestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors:
+        AllowMethods: "'POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+        AllowOrigin: "'*'"
 
   # ---------------------------------------------------------------- WebSocket API
   WebSocketApi:
@@ -192,7 +273,90 @@ Resources:
         ThrottlingBurstLimit: 100
         ThrottlingRateLimit: 50
 
+  # ---------------------------------------------------------------- Frontend Hosting (S3 + CloudFront with OAC)
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # Private bucket - CloudFront accesses it via OAC (no public website hosting)
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # Origin Access Control - lets CloudFront fetch from the private S3 bucket
+  FrontendOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # CloudFront distribution - HTTPS, global CDN, SPA routing
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref FrontendOAC
+            S3OriginConfig: {}   # Required placeholder when using OAC
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6   # CachingOptimized (AWS managed)
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+        # SPA fallback: return index.html for any 403/404 so React Router handles the path
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+        PriceClass: PriceClass_100   # US + Europe + Asia edges (cheapest; free tier covers this)
+
+  # Allow CloudFront OAC to read objects from the private bucket
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipal
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub arn:${AWS::Partition}:s3:::${FrontendBucket}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}
+
 Outputs:
   WebSocketUrl:
     Description: Put this in frontend/.env.local as VITE_WS_URL
     Value: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+  FrontendBucketName:
+    Description: "S3 bucket name - upload with: aws s3 sync dist s3://<FrontendBucketName> --delete"
+    Value: !Ref FrontendBucket
+  CloudFrontUrl:
+    Description: Public HTTPS URL for the whiteboard (via CloudFront CDN)
+    Value: !Sub https://${FrontendDistribution.DomainName}
+  CloudFrontDistributionId:
+    Description: Use for cache invalidation after deployments
+    Value: !Ref FrontendDistribution
+  SummarizeApiUrl:
+    Description: Put this in frontend/.env.local as VITE_SUMMARIZE_URL
+    Value: !Sub https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/summarize
