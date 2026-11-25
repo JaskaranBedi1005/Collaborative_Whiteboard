@@ -96,11 +96,20 @@ export async function handler(event) {
   // 404 included so deprecated/removed models are automatically skipped
   const FALLBACK_ON = new Set([404, 429, 503, 500]);
 
-  const promptText =
-    'You are analyzing a collaborative whiteboard drawing. ' +
-    'Provide a concise, clear description and summary of what is drawn on this board. ' +
-    'Highlight any text, diagrams, shapes, or diagrams present and explain what they represent. ' +
-    'Keep your response friendly, clear, and structured.';
+  // A fixed, simple format reads well in the side panel. The frontend also
+  // formats Markdown, so an answer that ignores these rules still looks clean.
+  const promptText = [
+    'You are looking at a picture of a shared whiteboard. Describe it for someone who cannot see it.',
+    '',
+    'Write your answer in exactly this shape:',
+    '1. One or two plain sentences that give the overall idea of the board.',
+    '2. Then up to 5 short bullet points, each on its own line starting with "- ". Cover the main things:',
+    '   any words written on the board (quote them exactly), diagrams and shapes, what arrows connect,',
+    '   and what it all seems to mean.',
+    '',
+    'Rules: no headings, no "#" characters, no bold or italics, no asterisks, no emoji, no closing remarks.',
+    'Keep it under 120 words. If the board is empty or only has scribbles, say that in one sentence.',
+  ].join('\n');
 
   const requestBody = JSON.stringify({
     contents: [

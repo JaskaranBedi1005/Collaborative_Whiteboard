@@ -25,6 +25,11 @@ export const BOARD_ID_PATTERN = /^[a-zA-Z0-9_-]{1,40}$/;
 // than 3 hours is a leftover. DynamoDB deletes it automatically (TTL, free).
 const CONNECTION_TTL_SECONDS = 3 * 60 * 60;
 
+// Saved strokes delete themselves this long after they were drawn (DynamoDB
+// TTL, free), so storage can't grow forever. Rows saved before this setting
+// existed have no expiry and are kept.
+const STROKE_TTL_SECONDS = 30 * 24 * 60 * 60;
+
 // Lambda keeps these in memory between calls (while the same worker stays
 // warm). This stops us reading DynamoDB on every single drawing message and
 // keeps us inside the always-free capacity.
@@ -47,12 +52,17 @@ export async function saveConnection(connectionId, boardId) {
   );
 }
 
+// Returns the board the connection was on (undefined if it was already gone),
+// so the caller can tell that board someone left.
 export async function removeConnection(connectionId) {
   boardOfConnection.delete(connectionId);
   for (const entry of boardMembers.values()) {
     entry.ids = entry.ids.filter((id) => id !== connectionId);
   }
-  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { connectionId } }));
+  const { Attributes } = await ddb.send(
+    new DeleteCommand({ TableName: TABLE, Key: { connectionId }, ReturnValues: 'ALL_OLD' }),
+  );
+  return Attributes?.boardId;
 }
 
 export async function getBoardOfConnection(connectionId) {
@@ -64,9 +74,11 @@ export async function getBoardOfConnection(connectionId) {
   return Item?.boardId;
 }
 
-export async function getBoardConnections(boardId) {
+// `fresh: true` skips the cache. Used for the online count, which must be
+// exact and is only computed when someone joins or leaves.
+export async function getBoardConnections(boardId, { fresh = false } = {}) {
   const cached = boardMembers.get(boardId);
-  if (cached && cached.expires > Date.now()) return cached.ids;
+  if (!fresh && cached && cached.expires > Date.now()) return cached.ids;
 
   const ids = [];
   let ExclusiveStartKey;
@@ -92,7 +104,12 @@ export async function saveStroke(boardId, stroke) {
   await ddb.send(
     new PutCommand({
       TableName: BOARD_STATE_TABLE,
-      Item: { boardId, strokeId: stroke.id, stroke },
+      Item: {
+        boardId,
+        strokeId: stroke.id,
+        stroke,
+        expiresAt: Math.floor(Date.now() / 1000) + STROKE_TTL_SECONDS,
+      },
     }),
   );
 }

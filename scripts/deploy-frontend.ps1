@@ -1,18 +1,22 @@
 param (
     [string]$BucketName,
     [string]$DistId,
-    [string]$WsUrl
+    [string]$WsUrl,
+    [string]$SummarizeUrl
 )
 
 $ErrorActionPreference = "Stop"
 
 # If not provided, fetch outputs from CloudFormation
-if (-not $BucketName -or -not $DistId -or -not $WsUrl) {
+if (-not $BucketName -or -not $DistId -or -not $WsUrl -or -not $SummarizeUrl) {
     Write-Host "Fetching stack outputs for collab-whiteboard..." -ForegroundColor Cyan
     try {
         $Outputs = aws cloudformation describe-stacks --stack-name collab-whiteboard --region us-east-1 --query "Stacks[0].Outputs" --output json | ConvertFrom-Json
         if (-not $WsUrl) {
             $WsUrl = ($Outputs | Where-Object { $_.OutputKey -eq "WebSocketUrl" }).OutputValue
+        }
+        if (-not $SummarizeUrl) {
+            $SummarizeUrl = ($Outputs | Where-Object { $_.OutputKey -eq "SummarizeApiUrl" }).OutputValue
         }
         if (-not $BucketName) {
             $BucketName = ($Outputs | Where-Object { $_.OutputKey -eq "FrontendBucketName" }).OutputValue
@@ -42,12 +46,15 @@ if (-not $DistId) {
     Write-Error "CloudFrontDistributionId is required. Either deploy the template with FrontendDistribution or pass -DistId <id>."
 }
 
-# 1. Build with VITE_WS_URL set
-Write-Host "`n1. Building frontend with VITE_WS_URL=$WsUrl..." -ForegroundColor Cyan
+# 1. Build with VITE_WS_URL and VITE_SUMMARIZE_URL set
+Write-Host "`n1. Building frontend with VITE_WS_URL=$WsUrl and VITE_SUMMARIZE_URL=$SummarizeUrl..." -ForegroundColor Cyan
 Push-Location "$PSScriptRoot/../frontend"
 try {
     if ($WsUrl) {
         $env:VITE_WS_URL = $WsUrl
+    }
+    if ($SummarizeUrl) {
+        $env:VITE_SUMMARIZE_URL = $SummarizeUrl
     }
     npm run build
 } finally {

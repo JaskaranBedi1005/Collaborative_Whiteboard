@@ -6,7 +6,8 @@
 //   stroke   - a finished line
 //   remove   - undo: delete one line by id
 //   clear    - wipe the board
-//   loadBoard - send the saved strokes back to this connection
+//   loadBoard - send the saved strokes back to this connection, then tell the
+//               whole board the new online count ({type:'presence', count})
 
 import {
   clearBoardStrokes,
@@ -16,7 +17,7 @@ import {
   removeStroke,
   saveStroke,
 } from './lib/db.mjs';
-import { sendToConnection, sendToConnections } from './lib/broadcast.mjs';
+import { broadcastPresence, sendToConnection, sendToConnections } from './lib/broadcast.mjs';
 
 const MAX_MESSAGE_CHARS = 32 * 1024;
 const MAX_LOAD_CHUNK_BYTES = 32 * 1024 - 1;
@@ -95,6 +96,13 @@ export async function handler(event) {
     const chunks = makeBoardLoadChunks(strokes, message.requestId);
     for (const chunk of chunks) {
       if (!(await sendToConnection(event, connectionId, chunk))) break;
+    }
+    // Every browser asks for the board right after connecting, so this is
+    // where everyone learns that someone joined.
+    try {
+      await broadcastPresence(event, boardId, { joined: connectionId });
+    } catch (err) {
+      console.error('Failed to broadcast presence on join', err.name, err.message);
     }
     return { statusCode: 200 };
   }

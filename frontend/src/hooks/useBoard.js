@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { sanitizeName } from '../lib/identity.js';
+import { LASER_COLOR } from '../lib/laser.js';
 import { useBoardSocket } from './useBoardSocket.js';
+
+// Other people's live points arrive in batches this far apart (see Whiteboard).
+const PROGRESS_BATCH_MS = 50;
 
 // A remote line that hasn't been updated for this long is assumed abandoned
 // (e.g. that person's internet dropped mid-stroke) and is removed.
@@ -14,12 +19,20 @@ function withoutKey(object, key) {
 
 // Holds everything that is on the board and keeps it in sync with everyone
 // else on the same board through the WebSocket.
-export function useBoard(boardId) {
+// `laser` (optional) is the store from createLaserTrails(); other people's
+// laser-pointer points go there instead of onto the board.
+export function useBoard(boardId, { laser } = {}) {
+  const laserRef = useRef(laser);
+  useEffect(() => {
+    laserRef.current = laser;
+  }, [laser]);
   const [strokes, setStrokes] = useState([]);
   // IDs of strokes *this* user drew, newest last, so Undo only removes your own work.
   const [myStrokeIds, setMyStrokeIds] = useState([]);
   // Lines other people are drawing right now: { [strokeId]: stroke }
   const [remoteLive, setRemoteLive] = useState({});
+  // How many people (browser tabs) are on this board, as reported by the server.
+  const [onlineCount, setOnlineCount] = useState(null);
   // Lines that are already finished or deleted. Messages can arrive slightly
   // out of order, so a late "progress" for these must be ignored.
   const closedIds = useRef(new Set());
@@ -47,13 +60,31 @@ export function useBoard(boardId) {
       }
       case 'progress': {
         const { stroke, from, points } = message;
-        if (!stroke?.id || !Array.isArray(points) || closedIds.current.has(stroke.id)) return;
+        if (!stroke?.id || !Array.isArray(points)) return;
+        // Laser pointer: fading trail only, never part of the board.
+        if (stroke.tool === 'laser') {
+          const valid = points.filter(
+            (p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]),
+          );
+          laserRef.current?.add(stroke.id, valid, {
+            color: LASER_COLOR,
+            spreadMs: PROGRESS_BATCH_MS,
+            label: sanitizeName(stroke.name),
+          });
+          return;
+        }
+        if (closedIds.current.has(stroke.id)) return;
+        // Who is drawing it, shown as a tag at the line's tip.
+        const name = sanitizeName(stroke.name);
         setRemoteLive((prev) => {
           const existing = prev[stroke.id]?.points ?? [];
           // Normally `from` equals what we already have and we just append.
           const merged =
             from <= existing.length ? existing.slice(0, from).concat(points) : existing.concat(points);
-          return { ...prev, [stroke.id]: { ...stroke, points: merged, updatedAt: Date.now() } };
+          return {
+            ...prev,
+            [stroke.id]: { ...stroke, name, points: merged, updatedAt: Date.now() },
+          };
         });
         break;
       }
@@ -78,6 +109,10 @@ export function useBoard(boardId) {
         setStrokes([]);
         setMyStrokeIds([]);
         setRemoteLive({});
+        break;
+      }
+      case 'presence': {
+        if (Number.isInteger(message.count) && message.count > 0) setOnlineCount(message.count);
         break;
       }
       default:
@@ -138,6 +173,8 @@ export function useBoard(boardId) {
     strokes,
     remoteLive,
     status,
+    // Only meaningful while connected; a stale number is worse than none.
+    onlineCount: status === 'online' ? onlineCount : null,
     addStroke,
     sendProgress,
     undo,

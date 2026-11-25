@@ -5,11 +5,17 @@
 // Shape of a stroke:
 // { id, tool: 'pen' | 'eraser', color, size, points: [[x, y], [x, y], ...] }
 
+import { displayColor } from './theme.js';
+
+// Saved as the colour of eraser strokes, for older clients that painted them.
 export const BOARD_BACKGROUND = '#ffffff';
 
-// The eraser paints with the background color, and is wider than the pen so
-// it is comfortable to use.
+// The eraser is wider than the pen so it is comfortable to use.
 const ERASER_SIZE_MULTIPLIER = 3;
+
+// What an eraser stroke looks like while it is still being drawn (the live
+// layer has nothing underneath to cut away, so it shows a soft trail instead).
+const ERASER_PREVIEW_COLOR = 'rgba(100, 116, 139, 0.22)';
 
 // Starts with a timestamp so strokes sort in drawing order (used in Phase 3),
 // plus a random part so two users drawing at the same millisecond don't clash.
@@ -22,6 +28,7 @@ export function createStroke({ tool, color, size }) {
   return {
     id: createStrokeId(),
     tool,
+    // Kept for older clients that painted the eraser in the background colour.
     color: isEraser ? BOARD_BACKGROUND : color,
     size: isEraser ? size * ERASER_SIZE_MULTIPLIER : size,
     points: [],
@@ -30,11 +37,20 @@ export function createStroke({ tool, color, size }) {
 
 // Draws one stroke. Instead of joining points with straight lines (which looks
 // jagged), it draws smooth curves through the midpoints between points.
-export function drawStroke(ctx, stroke) {
-  const { points, color, size } = stroke;
+//
+// Eraser strokes cut away the ink underneath ("destination-out"), so whatever
+// is behind the canvas (the dot grid) shows through. With `preview: true`
+// (the live layer) they are drawn as a soft trail instead.
+// `theme` swaps near-black / near-white ink for one readable on that board.
+export function drawStroke(ctx, stroke, { preview = false, theme = 'light' } = {}) {
+  const { points, size } = stroke;
   if (points.length === 0) return;
 
+  const isEraser = stroke.tool === 'eraser';
+  const color = isEraser && preview ? ERASER_PREVIEW_COLOR : displayColor(stroke.color, theme);
+
   ctx.save();
+  if (isEraser && !preview) ctx.globalCompositeOperation = 'destination-out';
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
   ctx.lineWidth = size;

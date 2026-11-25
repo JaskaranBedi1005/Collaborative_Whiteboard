@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react';
-import { createStroke, drawStroke } from '../lib/strokes';
+import { LASER_COLOR } from '../lib/laser';
+import { drawNameTag } from '../lib/nameTag';
+import { createStroke, createStrokeId, drawStroke } from '../lib/strokes';
 
 // Ignore tiny mouse movements so strokes stay small (fewer points to send/save).
 const MIN_POINT_DISTANCE = 1.5;
@@ -18,10 +20,13 @@ function setupCanvas(canvas, width, height) {
   canvas.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
-function redraw(canvas, { width, height }, strokes) {
+// `preview` is for the live layer: eraser strokes show as a soft trail there,
+// because there is no ink on that layer for them to cut away.
+// `theme` picks a readable ink for near-black / near-white lines.
+function redraw(canvas, { width, height }, strokes, { preview = false, theme } = {}) {
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, width, height);
-  for (const stroke of strokes) drawStroke(ctx, stroke);
+  for (const stroke of strokes) drawStroke(ctx, stroke, { preview, theme });
 }
 
 const round1 = (n) => Math.round(n * 10) / 10;
@@ -31,21 +36,37 @@ function getPoint(event, canvas) {
   return [round1(event.clientX - rect.left), round1(event.clientY - rect.top)];
 }
 
-// Two stacked canvases:
-//  - base: every finished stroke (only redrawn when the stroke list changes)
-//  - live: lines being drawn right now, yours and other people's
+// Three stacked canvases:
+//  - base:  every finished stroke (only redrawn when the stroke list changes)
+//  - laser: fading laser-pointer trails (animated only while one is visible)
+//  - live:  lines being drawn right now, yours and other people's; also
+//           receives the pointer events
 export default function Whiteboard({
   strokes,
   remoteLive,
+  laser,
+  theme = 'light',
+  myName = '',
   tool,
   color,
   size,
   onStrokeProgress,
   onStrokeComplete,
 }) {
+  const themeRef = useRef(theme);
+  const baseOpts = () => ({ theme: themeRef.current });
+  const liveOpts = () => ({ preview: true, theme: themeRef.current });
+  // Sent with your live points so others see who is drawing.
+  const myNameRef = useRef(myName);
+  useEffect(() => {
+    myNameRef.current = myName;
+  }, [myName]);
   const containerRef = useRef(null);
   const baseRef = useRef(null);
+  const laserCanvasRef = useRef(null);
   const liveRef = useRef(null);
+  // The laser trail you are drawing right now: { id, points, sent, lastSentAt }
+  const laserStrokeRef = useRef(null);
   const sizeRef = useRef({ width: 0, height: 0 });
   const strokesRef = useRef(strokes);
   const remoteLiveRef = useRef(remoteLive);
@@ -53,6 +74,26 @@ export default function Whiteboard({
   const sentPointsRef = useRef(0);
   const lastSentAtRef = useRef(0);
   const frameRef = useRef(0);
+
+  // Live layer = lines being drawn right now, plus a name tag at the tip of
+  // each line someone else is drawing (never on your own).
+  function paintLive() {
+    const canvas = liveRef.current;
+    redraw(canvas, sizeRef.current, liveStrokes(), liveOpts());
+    const ctx = canvas.getContext('2d');
+    for (const stroke of Object.values(remoteLiveRef.current)) {
+      const tip = stroke.points.at(-1);
+      if (!stroke.name || !tip) continue;
+      drawNameTag(ctx, {
+        name: stroke.name,
+        x: tip[0],
+        y: tip[1],
+        color: stroke.tool === 'eraser' ? null : stroke.color,
+        theme: themeRef.current,
+        bounds: sizeRef.current,
+      });
+    }
+  }
 
   function liveStrokes() {
     const list = Object.values(remoteLiveRef.current);
@@ -66,9 +107,10 @@ export default function Whiteboard({
       const { width, height } = entry.contentRect;
       sizeRef.current = { width, height };
       setupCanvas(baseRef.current, width, height);
+      setupCanvas(laserCanvasRef.current, width, height);
       setupCanvas(liveRef.current, width, height);
-      redraw(baseRef.current, sizeRef.current, strokesRef.current);
-      redraw(liveRef.current, sizeRef.current, liveStrokes());
+      redraw(baseRef.current, sizeRef.current, strokesRef.current, baseOpts());
+      paintLive();
     });
     observer.observe(containerRef.current);
     return () => {
@@ -77,11 +119,44 @@ export default function Whiteboard({
     };
   }, []);
 
+  // Switching theme repaints both layers with the right ink colours.
+  // (Declared before the strokes effect so the theme is current for it.)
+  useEffect(() => {
+    if (themeRef.current === theme) return;
+    themeRef.current = theme;
+    redraw(baseRef.current, sizeRef.current, strokesRef.current, baseOpts());
+    paintLive();
+  }, [theme]);
+
   // Repaint the finished strokes whenever the list changes (add/undo/clear).
   useEffect(() => {
     strokesRef.current = strokes;
-    redraw(baseRef.current, sizeRef.current, strokes);
+    redraw(baseRef.current, sizeRef.current, strokes, baseOpts());
   }, [strokes]);
+
+  // Laser layer: animate while any trail is still fading, then stop until new
+  // points arrive (no work at all while nobody is pointing).
+  useEffect(() => {
+    if (!laser) return undefined;
+    let frame = 0;
+    function tick() {
+      frame = 0;
+      const now = performance.now();
+      const { width, height } = sizeRef.current;
+      const ctx = laserCanvasRef.current.getContext('2d');
+      ctx.clearRect(0, 0, width, height);
+      const stillVisible = laser.prune(now);
+      laser.draw(ctx, now, { theme: themeRef.current, bounds: sizeRef.current });
+      if (stillVisible) frame = requestAnimationFrame(tick);
+    }
+    laser.setOnChange(() => {
+      if (!frame) frame = requestAnimationFrame(tick);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      laser.setOnChange(null);
+    };
+  }, [laser]);
 
   // Repaint the live layer when other people's in-progress lines change.
   useEffect(() => {
@@ -94,7 +169,7 @@ export default function Whiteboard({
     if (frameRef.current) return;
     frameRef.current = requestAnimationFrame(() => {
       frameRef.current = 0;
-      redraw(liveRef.current, sizeRef.current, liveStrokes());
+      paintLive();
     });
   }
 
@@ -113,7 +188,7 @@ export default function Whiteboard({
     if (stroke.points.length <= from) return;
     const { id, tool: strokeTool, color: strokeColor, size: strokeSize } = stroke;
     onStrokeProgress(
-      { id, tool: strokeTool, color: strokeColor, size: strokeSize },
+      { id, tool: strokeTool, color: strokeColor, size: strokeSize, name: myNameRef.current },
       from,
       stroke.points.slice(from),
     );
@@ -121,22 +196,76 @@ export default function Whiteboard({
     lastSentAtRef.current = performance.now();
   }
 
+  // ----- Laser pointer: shown locally, sent as "progress", never saved -----
+
+  function sendLaserProgress(trail) {
+    if (trail.points.length <= trail.sent) return;
+    onStrokeProgress(
+      { id: trail.id, tool: 'laser', color: LASER_COLOR, size: 4, name: myNameRef.current },
+      trail.sent,
+      trail.points.slice(trail.sent),
+    );
+    trail.sent = trail.points.length;
+    trail.lastSentAt = performance.now();
+  }
+
+  function startLaser(point) {
+    const trail = { id: createStrokeId(), points: [point], sent: 0, lastSentAt: 0 };
+    laserStrokeRef.current = trail;
+    laser?.add(trail.id, [point]);
+  }
+
+  function moveLaser(moves, canvas) {
+    const trail = laserStrokeRef.current;
+    const added = [];
+    for (const move of moves) {
+      const point = getPoint(move, canvas);
+      const last = trail.points[trail.points.length - 1];
+      if (Math.hypot(point[0] - last[0], point[1] - last[1]) < MIN_POINT_DISTANCE) continue;
+      trail.points.push(point);
+      added.push(point);
+    }
+    laser?.add(trail.id, added);
+    if (performance.now() - trail.lastSentAt >= PROGRESS_INTERVAL_MS) sendLaserProgress(trail);
+  }
+
+  function finishLaser() {
+    const trail = laserStrokeRef.current;
+    if (!trail) return;
+    laserStrokeRef.current = null;
+    sendLaserProgress(trail); // the last few points; nothing is saved
+  }
+
+  // ----- Pointer handling -----
+
+  // Browsers group fast movements together; "coalesced" events give us all
+  // of them, which makes quick strokes much smoother.
+  function pointerMoves(event) {
+    const coalesced = event.nativeEvent.getCoalescedEvents?.();
+    return coalesced && coalesced.length > 0 ? coalesced : [event.nativeEvent];
+  }
+
   function handlePointerDown(event) {
     if (event.pointerType === 'mouse' && event.button !== 0) return; // left click only
     event.currentTarget.setPointerCapture(event.pointerId);
-    startStroke(getPoint(event, event.currentTarget));
+    const point = getPoint(event, event.currentTarget);
+    if (tool === 'laser') {
+      startLaser(point);
+      return;
+    }
+    startStroke(point);
     scheduleLiveRender();
   }
 
   function handlePointerMove(event) {
+    if (laserStrokeRef.current) {
+      moveLaser(pointerMoves(event), event.currentTarget);
+      return;
+    }
     let stroke = currentStrokeRef.current;
     if (!stroke) return;
     const canvas = event.currentTarget;
-    // Browsers group fast movements together; "coalesced" events give us all
-    // of them, which makes quick strokes much smoother.
-    const coalesced = event.nativeEvent.getCoalescedEvents?.();
-    const moves = coalesced && coalesced.length > 0 ? coalesced : [event.nativeEvent];
-    for (const move of moves) {
+    for (const move of pointerMoves(event)) {
       const point = getPoint(move, canvas);
       const last = stroke.points[stroke.points.length - 1];
       if (Math.hypot(point[0] - last[0], point[1] - last[1]) < MIN_POINT_DISTANCE) continue;
@@ -159,22 +288,29 @@ export default function Whiteboard({
     currentStrokeRef.current = null;
     // Paint onto the base layer right away so nothing flickers while React
     // updates the stroke list.
-    drawStroke(baseRef.current.getContext('2d'), stroke);
-    redraw(liveRef.current, sizeRef.current, liveStrokes());
+    drawStroke(baseRef.current.getContext('2d'), stroke, baseOpts());
+    paintLive();
     onStrokeComplete(stroke);
+  }
+
+  function handlePointerEnd() {
+    finishLaser();
+    finishStroke();
   }
 
   return (
     <div ref={containerRef} className="board">
       <canvas ref={baseRef} className="board-layer" />
+      {/* Not part of the board image sent to the AI summary. */}
+      <canvas ref={laserCanvasRef} className="board-layer" data-export="false" />
       <canvas
         ref={liveRef}
         className={`board-layer board-input tool-${tool}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
-        onPointerUp={finishStroke}
-        onPointerCancel={finishStroke}
-        onLostPointerCapture={finishStroke}
+        onPointerUp={handlePointerEnd}
+        onPointerCancel={handlePointerEnd}
+        onLostPointerCapture={handlePointerEnd}
       />
     </div>
   );

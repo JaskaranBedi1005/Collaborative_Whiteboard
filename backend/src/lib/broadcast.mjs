@@ -4,7 +4,7 @@ import {
   ApiGatewayManagementApiClient,
   PostToConnectionCommand,
 } from '@aws-sdk/client-apigatewaymanagementapi';
-import { removeConnection } from './db.mjs';
+import { getBoardConnections, removeConnection } from './db.mjs';
 
 const clients = new Map();
 
@@ -40,6 +40,16 @@ export async function sendToConnection(event, connectionId, message) {
     }
     throw err;
   }
+}
+
+// Tells everyone on a board how many people are on it: {type:'presence', count}.
+// The board index can lag a moment behind writes, so the person joining is
+// added and the person leaving is removed by hand.
+export async function broadcastPresence(event, boardId, { joined, left } = {}) {
+  let ids = await getBoardConnections(boardId, { fresh: true });
+  if (left) ids = ids.filter((id) => id !== left);
+  if (joined && !ids.includes(joined)) ids = [...ids, joined];
+  await sendToConnections(event, ids, { type: 'presence', count: ids.length });
 }
 
 export async function sendToConnections(event, connectionIds, message) {
