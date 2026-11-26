@@ -14,6 +14,7 @@ import { getBoardId } from './lib/boardId.js';
 import { getBoardSnapshot } from './lib/exportImage.js';
 import { createLaserTrails } from './lib/laser.js';
 import { toPlainText } from './lib/markdown.js';
+import { isSelectable, translateStroke } from './lib/selection.js';
 
 const SUMMARIZE_URL = import.meta.env.VITE_SUMMARIZE_URL;
 const COOLDOWN_SECONDS = 30;
@@ -57,11 +58,37 @@ export default function App() {
     activePeople,
     addStroke,
     sendProgress,
+    moveStrokes,
+    deleteStrokes,
     undo,
     clear,
     canUndo,
   } =
     useBoard(boardId, { laser });
+
+  // Select tool: ids of the selected lines.
+  const [selectedIds, setSelectedIds] = useState([]);
+
+  // Leaving the Select tool clears the selection.
+  useEffect(() => {
+    if (tool !== 'select') setSelectedIds([]);
+  }, [tool]);
+
+  // Drop lines from the selection once they no longer exist (someone else
+  // deleted them, or the board was cleared).
+  useEffect(() => {
+    setSelectedIds((ids) => {
+      if (ids.length === 0) return ids;
+      const present = new Set(strokes.map((s) => s.id));
+      const kept = ids.filter((id) => present.has(id));
+      return kept.length === ids.length ? ids : kept;
+    });
+  }, [strokes]);
+
+  const handleMoveSelection = useCallback(
+    (ids, dx, dy) => moveStrokes(ids, (s) => translateStroke(s, dx, dy)),
+    [moveStrokes],
+  );
   const { theme, toggleTheme } = useTheme();
 
   // Display name shown next to your pen. Asked for on the first visit.
@@ -85,6 +112,15 @@ export default function App() {
   }, []);
 
   useEffect(() => () => clearTimeout(toastTimer.current), []);
+
+  // (Defined after showToast, which it uses.)
+  const handleDeleteSelection = useCallback(() => {
+    if (selectedIds.length === 0) return;
+    const n = selectedIds.length;
+    deleteStrokes(selectedIds);
+    setSelectedIds([]);
+    showToast(`Deleted ${n} ${n === 1 ? 'line' : 'lines'}. Press Ctrl+Z to bring ${n === 1 ? 'it' : 'them'} back.`);
+  }, [deleteStrokes, selectedIds, showToast]);
 
   // Cooldown timer tick
   useEffect(() => {
@@ -166,18 +202,29 @@ export default function App() {
     showToast('Board cleared for everyone.');
   }
 
-  // Keyboard shortcuts: Ctrl/Cmd+Z undo, P pen, E eraser, L laser, [ and ] brush size.
+  // Keyboard shortcuts: Ctrl/Cmd+Z undo, V select, P pen, E eraser, L laser,
+  // [ and ] brush size; with a selection: Delete/Backspace, Ctrl+A, Escape.
   useEffect(() => {
     function onKeyDown(event) {
       const typing = event.target.closest?.('input, textarea, [contenteditable="true"]');
       if (typing || document.querySelector('[role="dialog"]')) return;
       const key = event.key.toLowerCase();
+      const mod = event.ctrlKey || event.metaKey;
       if (key === 'escape') {
-        setIsPanelOpen(false);
-      } else if ((event.ctrlKey || event.metaKey) && key === 'z') {
+        // First clear the selection, then close the summary panel.
+        if (selectedIds.length > 0) setSelectedIds([]);
+        else setIsPanelOpen(false);
+      } else if ((key === 'delete' || key === 'backspace') && selectedIds.length > 0) {
+        event.preventDefault();
+        handleDeleteSelection();
+      } else if (mod && key === 'a' && tool === 'select') {
+        event.preventDefault();
+        setSelectedIds(strokes.filter(isSelectable).map((s) => s.id));
+      } else if (mod && key === 'z') {
         event.preventDefault();
         undo();
-      } else if (!event.ctrlKey && !event.metaKey && !event.altKey) {
+      } else if (!mod && !event.altKey) {
+        if (key === 'v') setTool('select');
         if (key === 'p') setTool('pen');
         if (key === 'e') setTool('eraser');
         if (key === 'l') setTool('laser');
@@ -187,7 +234,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [undo]);
+  }, [undo, selectedIds, handleDeleteSelection, tool, strokes]);
 
   return (
     <div className={`app ${isPanelOpen ? 'has-side-panel' : ''}`}>
@@ -202,6 +249,10 @@ export default function App() {
         size={size}
         onStrokeProgress={sendProgress}
         onStrokeComplete={addStroke}
+        selectedIds={selectedIds}
+        onSelect={setSelectedIds}
+        onMoveSelection={handleMoveSelection}
+        onDeleteSelection={handleDeleteSelection}
       />
 
       {isEmpty && (

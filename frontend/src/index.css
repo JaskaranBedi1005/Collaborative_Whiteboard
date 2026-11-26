@@ -814,6 +814,37 @@ input {
   cursor: pointer;
 }
 
+/* ---------- Select tool ---------- */
+
+.board-input.tool-select {
+  cursor: default;
+}
+
+/* Floating bar above a selection: count + Delete (useful on touch screens). */
+.selection-bar {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 4px 4px 12px;
+  transform: translateX(-50%);
+  background: var(--surface-solid);
+  animation: fade-in 0.12s ease-out;
+}
+
+.selection-count {
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.selection-bar .tool-button {
+  width: 34px;
+  height: 34px;
+}
+
 /* ---------- Empty board hint ---------- */
 
 .empty-hint {

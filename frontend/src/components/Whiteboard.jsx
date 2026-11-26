@@ -1,7 +1,15 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { LASER_COLOR } from '../lib/laser';
 import { drawNameTag } from '../lib/nameTag';
+import {
+  pointInBox,
+  selectionBounds,
+  strokesInRect,
+  topStrokeAt,
+  translateStroke,
+} from '../lib/selection';
 import { createStroke, createStrokeId, drawStroke } from '../lib/strokes';
+import { TrashIcon } from './icons.jsx';
 
 // Ignore tiny mouse movements so strokes stay small (fewer points to send/save).
 const MIN_POINT_DISTANCE = 1.5;
@@ -13,6 +21,12 @@ const MAX_POINTS_PER_STROKE = 1000;
 // How long someone's name tag stays after their line is finished
 // (fully visible for the first half, then fading out).
 const TAG_LINGER_MS = 1200;
+// Select tool look.
+const SELECTION_COLOR = '#6366f1';
+const SELECTION_FILL = 'rgba(99, 102, 241, 0.06)';
+const SELECTION_PADDING = 6;
+// A drag shorter than this is a click, not a move or a box.
+const DRAG_THRESHOLD = 3;
 
 // Makes the canvas use the screen's real pixel density so lines stay sharp on
 // high-resolution displays, while we keep drawing in normal CSS pixels.
@@ -55,8 +69,30 @@ export default function Whiteboard({
   size,
   onStrokeProgress,
   onStrokeComplete,
+  // Select tool
+  selectedIds = [],
+  onSelect,
+  onMoveSelection,
+  onDeleteSelection,
 }) {
   const themeRef = useRef(theme);
+  // Current selection, and what the pointer is doing with it:
+  //   { mode: 'move', start: [x, y], dx, dy, moved }  dragging the selection
+  //   { mode: 'box', x0, y0, x1, y1, additive, base } dragging a selection box
+  const selectedRef = useRef(new Set(selectedIds));
+  const dragRef = useRef(null);
+  const [isDragging, setIsDragging] = useState(false);
+  useEffect(() => {
+    selectedRef.current = new Set(selectedIds);
+  }, [selectedIds]);
+  // Read by handlers created once (e.g. the resize observer).
+  const toolRef = useRef(tool);
+  useEffect(() => {
+    toolRef.current = tool;
+    // The Select tool sets the cursor directly; give the other tools theirs back.
+    if (liveRef.current) liveRef.current.style.cursor = '';
+    dragRef.current = null;
+  }, [tool]);
   const baseOpts = () => ({ theme: themeRef.current });
   const liveOpts = () => ({ preview: true, theme: themeRef.current });
   // Sent with your live points so others see who is drawing.
@@ -138,6 +174,56 @@ export default function Whiteboard({
       stillFading = true;
     }
     if (stillFading) scheduleLiveRender();
+
+    if (toolRef.current === 'select') paintSelection(ctx);
+  }
+
+  // Selected lines while being dragged, the dashed box around the selection,
+  // and the selection box being dragged out.
+  function paintSelection(ctx) {
+    const drag = dragRef.current;
+    const selected = strokesRef.current.filter((s) => selectedRef.current.has(s.id));
+    const moving = drag?.mode === 'move' && drag.moved;
+    const dx = moving ? drag.dx : 0;
+    const dy = moving ? drag.dy : 0;
+
+    if (moving) {
+      for (const stroke of selected) drawStroke(ctx, translateStroke(stroke, dx, dy), baseOpts());
+    }
+
+    const box = selectionBounds(selected);
+    ctx.save();
+    if (box) {
+      const pad = SELECTION_PADDING;
+      ctx.strokeStyle = SELECTION_COLOR;
+      ctx.fillStyle = SELECTION_FILL;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.rect(box.minX - pad + dx, box.minY - pad + dy, box.maxX - box.minX + pad * 2, box.maxY - box.minY + pad * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    if (drag?.mode === 'box') {
+      ctx.strokeStyle = SELECTION_COLOR;
+      ctx.fillStyle = SELECTION_FILL;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.rect(drag.x0, drag.y0, drag.x1 - drag.x0, drag.y1 - drag.y0);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // The base layer, minus the selected lines while they are being dragged
+  // (they are drawn moving on the live layer instead).
+  function redrawBase() {
+    const drag = dragRef.current;
+    const lifted = drag?.mode === 'move' && drag.moved ? selectedRef.current : null;
+    const list = lifted ? strokesRef.current.filter((s) => !lifted.has(s.id)) : strokesRef.current;
+    redraw(baseRef.current, sizeRef.current, list, baseOpts());
   }
 
   function liveStrokes() {
@@ -154,7 +240,7 @@ export default function Whiteboard({
       setupCanvas(baseRef.current, width, height);
       setupCanvas(laserCanvasRef.current, width, height);
       setupCanvas(liveRef.current, width, height);
-      redraw(baseRef.current, sizeRef.current, strokesRef.current, baseOpts());
+      redrawBase();
       paintLive();
     });
     observer.observe(containerRef.current);
@@ -169,14 +255,14 @@ export default function Whiteboard({
   useEffect(() => {
     if (themeRef.current === theme) return;
     themeRef.current = theme;
-    redraw(baseRef.current, sizeRef.current, strokesRef.current, baseOpts());
+    redrawBase();
     paintLive();
   }, [theme]);
 
-  // Repaint the finished strokes whenever the list changes (add/undo/clear).
+  // Repaint the finished strokes whenever the list changes (add/undo/move/clear).
   useEffect(() => {
     strokesRef.current = strokes;
-    redraw(baseRef.current, sizeRef.current, strokes, baseOpts());
+    redrawBase();
   }, [strokes]);
 
   // Laser layer: animate while any trail is still fading, then stop until new
@@ -290,10 +376,103 @@ export default function Whiteboard({
     return coalesced && coalesced.length > 0 ? coalesced : [event.nativeEvent];
   }
 
+  // ----- Select tool: click a line, drag a box, drag the selection -----
+
+  function selectedBox() {
+    return selectionBounds(strokesRef.current.filter((s) => selectedRef.current.has(s.id)));
+  }
+
+  function setSelection(ids) {
+    selectedRef.current = new Set(ids);
+    onSelect?.(ids);
+  }
+
+  function startSelect(point, shiftKey) {
+    const [x, y] = point;
+    const current = [...selectedRef.current];
+
+    // Grab the existing selection anywhere inside its box.
+    if (!shiftKey && current.length > 0 && pointInBox(x, y, selectedBox(), SELECTION_PADDING)) {
+      dragRef.current = { mode: 'move', start: point, dx: 0, dy: 0, moved: false };
+      return;
+    }
+
+    const hit = topStrokeAt(strokesRef.current, x, y);
+    if (hit) {
+      if (shiftKey) {
+        // Shift-click adds or removes one line.
+        setSelection(current.includes(hit.id) ? current.filter((id) => id !== hit.id) : [...current, hit.id]);
+        return;
+      }
+      setSelection([hit.id]); // select it and allow dragging straight away
+      dragRef.current = { mode: 'move', start: point, dx: 0, dy: 0, moved: false };
+      return;
+    }
+
+    // Empty space: drag out a selection box.
+    dragRef.current = { mode: 'box', x0: x, y0: y, x1: x, y1: y, additive: shiftKey, base: current };
+    scheduleLiveRender();
+  }
+
+  function moveSelect(point, canvas) {
+    const drag = dragRef.current;
+    const [x, y] = point;
+    if (!drag) {
+      // Hover: show what a press would do.
+      const overSelection = selectedRef.current.size > 0 && pointInBox(x, y, selectedBox(), SELECTION_PADDING);
+      canvas.style.cursor = overSelection ? 'move' : topStrokeAt(strokesRef.current, x, y) ? 'pointer' : '';
+      return;
+    }
+    if (drag.mode === 'move') {
+      drag.dx = x - drag.start[0];
+      drag.dy = y - drag.start[1];
+      if (!drag.moved && Math.hypot(drag.dx, drag.dy) >= DRAG_THRESHOLD) {
+        drag.moved = true;
+        setIsDragging(true);
+        redrawBase(); // lift the selected lines off the base layer
+      }
+    } else {
+      drag.x1 = x;
+      drag.y1 = y;
+    }
+    scheduleLiveRender();
+  }
+
+  function finishSelect() {
+    const drag = dragRef.current;
+    if (!drag) return;
+    dragRef.current = null;
+
+    if (drag.mode === 'move') {
+      if (drag.moved) {
+        const ids = [...selectedRef.current];
+        // Paint the moved lines straight away so nothing flickers while the
+        // board state updates.
+        const movedById = new Map(
+          strokesRef.current
+            .filter((s) => selectedRef.current.has(s.id))
+            .map((s) => [s.id, translateStroke(s, drag.dx, drag.dy)]),
+        );
+        redraw(baseRef.current, sizeRef.current, strokesRef.current.map((s) => movedById.get(s.id) ?? s), baseOpts());
+        onMoveSelection?.(ids, drag.dx, drag.dy);
+        setIsDragging(false);
+      }
+    } else {
+      const tiny = Math.abs(drag.x1 - drag.x0) < DRAG_THRESHOLD && Math.abs(drag.y1 - drag.y0) < DRAG_THRESHOLD;
+      const inBox = tiny ? [] : strokesInRect(strokesRef.current, drag).map((s) => s.id);
+      setSelection(drag.additive ? [...new Set([...drag.base, ...inBox])] : inBox);
+    }
+    scheduleLiveRender();
+  }
+
   function handlePointerDown(event) {
     if (event.pointerType === 'mouse' && event.button !== 0) return; // left click only
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = getPoint(event, event.currentTarget);
+    if (tool === 'select') {
+      startSelect(point, event.shiftKey);
+      return;
+    }
     if (tool === 'laser') {
       startLaser(point);
       return;
@@ -303,6 +482,10 @@ export default function Whiteboard({
   }
 
   function handlePointerMove(event) {
+    if (tool === 'select') {
+      moveSelect(getPoint(event, event.currentTarget), event.currentTarget);
+      return;
+    }
     if (laserStrokeRef.current) {
       moveLaser(pointerMoves(event), event.currentTarget);
       return;
@@ -339,9 +522,24 @@ export default function Whiteboard({
   }
 
   function handlePointerEnd() {
+    finishSelect();
     finishLaser();
     finishStroke();
   }
+
+  // Floating bar above the selection (Delete button, handy on touch screens).
+  const selectionBar = useMemo(() => {
+    if (tool !== 'select' || selectedIds.length === 0) return null;
+    const ids = new Set(selectedIds);
+    const box = selectionBounds(strokes.filter((s) => ids.has(s.id)));
+    if (!box) return null;
+    const above = box.minY - SELECTION_PADDING - 48;
+    return {
+      left: (box.minX + box.maxX) / 2,
+      top: above >= 8 ? above : box.maxY + SELECTION_PADDING + 8,
+      count: ids.size,
+    };
+  }, [tool, selectedIds, strokes]);
 
   return (
     <div ref={containerRef} className="board">
@@ -357,6 +555,27 @@ export default function Whiteboard({
         onPointerCancel={handlePointerEnd}
         onLostPointerCapture={handlePointerEnd}
       />
+      {selectionBar && !isDragging && (
+        <div
+          className="selection-bar panel"
+          style={{ left: selectionBar.left, top: selectionBar.top }}
+          role="toolbar"
+          aria-label="Selection"
+        >
+          <span className="selection-count">
+            {selectionBar.count} {selectionBar.count === 1 ? 'line' : 'lines'}
+          </span>
+          <button
+            type="button"
+            className="tool-button tool-button-danger"
+            onClick={onDeleteSelection}
+            aria-label="Delete selection"
+            data-tooltip="Delete · Del"
+          >
+            <TrashIcon size={18} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
