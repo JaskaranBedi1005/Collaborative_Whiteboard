@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { ACTIVE_FOR_MS, sameActivity } from '../lib/activity.js';
 import { sanitizeName } from '../lib/identity.js';
 import { LASER_COLOR } from '../lib/laser.js';
 import { useBoardSocket } from './useBoardSocket.js';
@@ -38,6 +39,31 @@ export function useBoard(boardId, { laser } = {}) {
   const closedIds = useRef(new Set());
   const removedIds = useRef(new Set());
 
+  // Who else is drawing / erasing / pointing right now.
+  // The ref is updated on every live message (~20 a second per person); the
+  // state only changes when the list itself changes, to avoid extra renders.
+  const activityRef = useRef(new Map()); // name -> { tool, at }
+  const [activePeople, setActivePeople] = useState([]);
+
+  const refreshActivity = useCallback(() => {
+    const cutoff = Date.now() - ACTIVE_FOR_MS;
+    for (const [name, entry] of activityRef.current) {
+      if (entry.at < cutoff) activityRef.current.delete(name);
+    }
+    const next = [...activityRef.current].map(([name, { tool }]) => ({ name, tool }));
+    setActivePeople((prev) => (sameActivity(prev, next) ? prev : next));
+  }, []);
+
+  const noteActivity = useCallback(
+    (name, tool) => {
+      if (!name) return;
+      const previous = activityRef.current.get(name);
+      activityRef.current.set(name, { tool, at: Date.now() });
+      if (!previous || previous.tool !== tool) refreshActivity();
+    },
+    [refreshActivity],
+  );
+
   const handleMessage = useCallback((message) => {
     switch (message.type) {
       case 'loadBoard': {
@@ -61,21 +87,23 @@ export function useBoard(boardId, { laser } = {}) {
       case 'progress': {
         const { stroke, from, points } = message;
         if (!stroke?.id || !Array.isArray(points)) return;
+        // Who is doing it: shown as a tag at the tip and in the top bar.
+        const name = sanitizeName(stroke.name);
+        const tool = stroke.tool === 'eraser' || stroke.tool === 'laser' ? stroke.tool : 'pen';
+        noteActivity(name, tool);
         // Laser pointer: fading trail only, never part of the board.
-        if (stroke.tool === 'laser') {
+        if (tool === 'laser') {
           const valid = points.filter(
             (p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]),
           );
           laserRef.current?.add(stroke.id, valid, {
             color: LASER_COLOR,
             spreadMs: PROGRESS_BATCH_MS,
-            label: sanitizeName(stroke.name),
+            label: name,
           });
           return;
         }
         if (closedIds.current.has(stroke.id)) return;
-        // Who is drawing it, shown as a tag at the line's tip.
-        const name = sanitizeName(stroke.name);
         setRemoteLive((prev) => {
           const existing = prev[stroke.id]?.points ?? [];
           // Normally `from` equals what we already have and we just append.
@@ -119,9 +147,16 @@ export function useBoard(boardId, { laser } = {}) {
         // Unknown message (e.g. an error notice from AWS): ignore it.
         break;
     }
-  }, []);
+  }, [noteActivity]);
 
   const { status, send } = useBoardSocket(boardId, handleMessage);
+
+  // Forget people who stopped moving (checked twice a second while anyone is active).
+  useEffect(() => {
+    if (activePeople.length === 0) return undefined;
+    const timer = setInterval(refreshActivity, 500);
+    return () => clearInterval(timer);
+  }, [activePeople.length, refreshActivity]);
 
   // Drop half-finished remote lines that stopped updating.
   useEffect(() => {
@@ -175,6 +210,8 @@ export function useBoard(boardId, { laser } = {}) {
     status,
     // Only meaningful while connected; a stale number is worse than none.
     onlineCount: status === 'online' ? onlineCount : null,
+    // Other people drawing / erasing / pointing right now: [{ name, tool }]
+    activePeople: status === 'online' ? activePeople : [],
     addStroke,
     sendProgress,
     undo,

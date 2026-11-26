@@ -8,6 +8,7 @@ import TopBar from './components/TopBar.jsx';
 import Whiteboard from './components/Whiteboard.jsx';
 import { CheckIcon, PenIcon } from './components/icons.jsx';
 import { useBoard } from './hooks/useBoard.js';
+import { useRecentBoards } from './hooks/useRecentBoards.js';
 import { useTheme } from './hooks/useTheme.js';
 import { getBoardId } from './lib/boardId.js';
 import { getBoardSnapshot } from './lib/exportImage.js';
@@ -22,6 +23,12 @@ const MAX_SIZE = 30;
 
 export default function App() {
   const [boardId] = useState(getBoardId);
+  const recent = useRecentBoards(boardId);
+
+  // Browser tab title: the board's friendly name if it has one.
+  useEffect(() => {
+    document.title = `${recent.currentLabel || `#${boardId}`} · Whiteboard`;
+  }, [boardId, recent.currentLabel]);
   const [tool, setTool] = useState('pen');
   const [color, setColor] = useState(COLORS[0].value);
   const [size, setSize] = useState(4);
@@ -42,7 +49,18 @@ export default function App() {
   // connection (adds other people's).
   const [laser] = useState(createLaserTrails);
 
-  const { strokes, remoteLive, status, onlineCount, addStroke, sendProgress, undo, clear, canUndo } =
+  const {
+    strokes,
+    remoteLive,
+    status,
+    onlineCount,
+    activePeople,
+    addStroke,
+    sendProgress,
+    undo,
+    clear,
+    canUndo,
+  } =
     useBoard(boardId, { laser });
   const { theme, toggleTheme } = useTheme();
 
@@ -208,6 +226,11 @@ export default function App() {
         onToggleTheme={toggleTheme}
         myName={myName}
         onEditName={() => setIsNameDialogOpen(true)}
+        currentLabel={recent.currentLabel}
+        recentBoards={recent.boards}
+        onRenameBoard={recent.rename}
+        onRemoveBoard={recent.remove}
+        activePeople={activePeople}
       />
 
       <ToolDock

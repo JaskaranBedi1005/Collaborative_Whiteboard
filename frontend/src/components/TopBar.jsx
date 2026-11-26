@@ -1,5 +1,17 @@
-import { LinkIcon, LogoMark, MoonIcon, SparklesIcon, SunIcon, UsersIcon } from './icons.jsx';
+import {
+  EraserIcon,
+  LaserIcon,
+  LinkIcon,
+  LogoMark,
+  MoonIcon,
+  PenIcon,
+  SparklesIcon,
+  SunIcon,
+  UsersIcon,
+} from './icons.jsx';
 import { initials } from '../lib/identity.js';
+import { describeActivity } from '../lib/activity.js';
+import BoardMenu from './BoardMenu.jsx';
 
 function statusText(status, onlineCount) {
   if (status === 'online') {
@@ -25,7 +37,15 @@ export default function TopBar({
   onToggleTheme,
   myName,
   onEditName,
+  currentLabel = '',
+  recentBoards = [],
+  onRenameBoard,
+  onRemoveBoard,
+  activePeople = [],
 }) {
+  const activity = describeActivity(activePeople);
+  const firstTool = activePeople[0]?.tool;
+  const ActivityIcon = firstTool === 'laser' ? LaserIcon : firstTool === 'eraser' ? EraserIcon : PenIcon;
   const nextTheme = theme === 'dark' ? 'light' : 'dark';
   const summarizeLabel = isSummarizing
     ? 'Summarizing…'
@@ -39,15 +59,31 @@ export default function TopBar({
         <LogoMark />
         <span className="brand-name">Whiteboard</span>
         <span className="divider" aria-hidden="true" />
-        <span className="board-chip" title="Board name. Everyone with this link sees the same board.">
-          <span className="board-chip-hash" aria-hidden="true">
-            #
-          </span>
-          {boardId}
-        </span>
+        <BoardMenu
+          boardId={boardId}
+          currentLabel={currentLabel}
+          boards={recentBoards}
+          onRename={onRenameBoard}
+          onRemove={onRemoveBoard}
+        />
       </div>
 
       <div className="panel actions">
+        {/* Always rendered (empty when idle) so screen readers announce changes. */}
+        <span className="activity" aria-live="polite">
+          {activity && (
+            <span
+              className="activity-pill"
+              title={activePeople.length > 2 ? `${activity}: ${activePeople.map((p) => p.name).join(', ')}` : activity}
+            >
+              <span className="activity-icon" aria-hidden="true">
+                <ActivityIcon size={14} />
+              </span>
+              <span className="activity-text">{activity}</span>
+            </span>
+          )}
+        </span>
+
         <span
           className={`presence presence-${status}`}
           title={status === 'online' ? 'People on this board right now' : 'Connection to the server'}

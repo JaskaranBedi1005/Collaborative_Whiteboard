@@ -1,10 +1,19 @@
 // Every board has a name that lives in the link, e.g. ?board=team42.
 // People who open the same link end up on the same board (from Phase 2 on).
 
-const BOARD_ID_PATTERN = /^[a-zA-Z0-9_-]{1,40}$/;
+export const BOARD_ID_PATTERN = /^[a-zA-Z0-9_-]{1,40}$/;
 
-function randomBoardId() {
+export function randomBoardId() {
   return Math.random().toString(36).slice(2, 8);
+}
+
+// The link to a board on this site (keeps the current address, swaps ?board=).
+export function boardLink(boardId) {
+  const url = new URL(window.location.href);
+  url.search = '';
+  url.hash = '';
+  url.searchParams.set('board', boardId);
+  return url.toString();
 }
 
 export function getBoardId() {

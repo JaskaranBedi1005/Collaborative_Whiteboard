@@ -10,6 +10,9 @@ const PROGRESS_INTERVAL_MS = 50;
 // Very long scribbles are split into several strokes so each message stays
 // well under API Gateway's 32 KB frame size.
 const MAX_POINTS_PER_STROKE = 1000;
+// How long someone's name tag stays after their line is finished
+// (fully visible for the first half, then fading out).
+const TAG_LINGER_MS = 1200;
 
 // Makes the canvas use the screen's real pixel density so lines stay sharp on
 // high-resolution displays, while we keep drawing in normal CSS pixels.
@@ -70,6 +73,10 @@ export default function Whiteboard({
   const sizeRef = useRef({ width: 0, height: 0 });
   const strokesRef = useRef(strokes);
   const remoteLiveRef = useRef(remoteLive);
+  // Last painted set of other people's live lines, to spot the ones that just
+  // finished; and their fading tags: { [id]: { name, tip, color, endedAt } }.
+  const prevRemoteRef = useRef({});
+  const lingeringTagsRef = useRef(new Map());
   const currentStrokeRef = useRef(null);
   const sentPointsRef = useRef(0);
   const lastSentAtRef = useRef(0);
@@ -77,22 +84,60 @@ export default function Whiteboard({
 
   // Live layer = lines being drawn right now, plus a name tag at the tip of
   // each line someone else is drawing (never on your own).
+  // When someone's line finishes, their tag stays at its end for a moment and
+  // fades out, instead of vanishing the instant they lift the pen.
   function paintLive() {
+    const now = performance.now();
+    const remote = remoteLiveRef.current;
+
+    for (const [id, stroke] of Object.entries(prevRemoteRef.current)) {
+      const tip = stroke.points.at(-1);
+      if (!remote[id] && stroke.name && tip) {
+        lingeringTagsRef.current.set(id, {
+          name: stroke.name,
+          tip,
+          color: stroke.tool === 'eraser' ? null : stroke.color,
+          endedAt: now,
+        });
+      }
+    }
+    prevRemoteRef.current = remote;
+
     const canvas = liveRef.current;
     redraw(canvas, sizeRef.current, liveStrokes(), liveOpts());
     const ctx = canvas.getContext('2d');
-    for (const stroke of Object.values(remoteLiveRef.current)) {
-      const tip = stroke.points.at(-1);
-      if (!stroke.name || !tip) continue;
+    const tag = (name, tip, color, alpha = 1) =>
       drawNameTag(ctx, {
-        name: stroke.name,
+        name,
         x: tip[0],
         y: tip[1],
-        color: stroke.tool === 'eraser' ? null : stroke.color,
+        color,
         theme: themeRef.current,
+        alpha,
         bounds: sizeRef.current,
       });
+
+    const drawingNow = new Set();
+    for (const stroke of Object.values(remote)) {
+      const tip = stroke.points.at(-1);
+      if (!stroke.name || !tip) continue;
+      drawingNow.add(stroke.name);
+      tag(stroke.name, tip, stroke.tool === 'eraser' ? null : stroke.color);
     }
+
+    let stillFading = false;
+    for (const [id, t] of lingeringTagsRef.current) {
+      const age = now - t.endedAt;
+      // Gone once faded, or as soon as that person starts another line.
+      if (age >= TAG_LINGER_MS || drawingNow.has(t.name)) {
+        lingeringTagsRef.current.delete(id);
+        continue;
+      }
+      const fadeStart = TAG_LINGER_MS / 2;
+      tag(t.name, t.tip, t.color, age < fadeStart ? 1 : 1 - (age - fadeStart) / fadeStart);
+      stillFading = true;
+    }
+    if (stillFading) scheduleLiveRender();
   }
 
   function liveStrokes() {

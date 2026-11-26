@@ -122,6 +122,26 @@ export const CopyIcon = (p) => (
   </Icon>
 );
 
+export const ChevronDownIcon = (p) => (
+  <Icon {...p}>
+    <path d="m6 9 6 6 6-6" />
+  </Icon>
+);
+
+export const PlusIcon = (p) => (
+  <Icon {...p}>
+    <path d="M12 5v14" />
+    <path d="M5 12h14" />
+  </Icon>
+);
+
+export const EditIcon = (p) => (
+  <Icon {...p}>
+    <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+    <path d="M18.4 2.6a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z" />
+  </Icon>
+);
+
 export const CheckIcon = (p) => (
   <Icon {...p}>
     <path d="M20 6 9 17l-5-5" />
