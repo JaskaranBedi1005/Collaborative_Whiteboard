@@ -21,6 +21,13 @@ function Icon({ size = 18, children, ...props }) {
   );
 }
 
+export const SelectIcon = (p) => (
+  <Icon {...p}>
+    <path d="M4 3l7.5 17 2.2-6.8L20.5 11Z" />
+    <path d="m13.7 13.2 5.3 5.3" />
+  </Icon>
+);
+
 export const PenIcon = (p) => (
   <Icon {...p}>
     <path d="M12 20h9" />

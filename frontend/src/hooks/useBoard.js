@@ -11,6 +11,17 @@ const PROGRESS_BATCH_MS = 50;
 // (e.g. that person's internet dropped mid-stroke) and is removed.
 const STALE_LIVE_STROKE_MS = 5000;
 
+// Moving or deleting many lines sends one message per line. API Gateway is
+// throttled at 50 messages/second, so bulk changes go out at a steady pace.
+const BULK_SEND_INTERVAL_MS = 40; // 25 a second
+const MAX_HISTORY = 100;
+
+// Restored lines get a new id (others may already have ignored the old one as
+// deleted). Keeping the old id as a prefix keeps them in the same drawing order.
+const restoredId = (id) => `${id}-u${Math.random().toString(36).slice(2, 6)}`;
+
+const byId = (a, b) => a.id.localeCompare(b.id);
+
 function withoutKey(object, key) {
   if (!(key in object)) return object;
   const copy = { ...object };
@@ -28,8 +39,25 @@ export function useBoard(boardId, { laser } = {}) {
     laserRef.current = laser;
   }, [laser]);
   const [strokes, setStrokes] = useState([]);
-  // IDs of strokes *this* user drew, newest last, so Undo only removes your own work.
-  const [myStrokeIds, setMyStrokeIds] = useState([]);
+  const strokesRef = useRef(strokes);
+  useEffect(() => {
+    strokesRef.current = strokes;
+  }, [strokes]);
+
+  // Undo history of *your own* actions, newest last:
+  //   { kind: 'add', id }            a line you drew
+  //   { kind: 'move', before: [...] } lines you moved (their old versions)
+  //   { kind: 'delete', strokes: [...] } lines you deleted with Select
+  const historyRef = useRef([]);
+  const [historySize, setHistorySize] = useState(0);
+  const pushHistory = useCallback((action) => {
+    historyRef.current = [...historyRef.current, action].slice(-MAX_HISTORY);
+    setHistorySize(historyRef.current.length);
+  }, []);
+  const resetHistory = useCallback(() => {
+    historyRef.current = [];
+    setHistorySize(0);
+  }, []);
   // Lines other people are drawing right now: { [strokeId]: stroke }
   const [remoteLive, setRemoteLive] = useState({});
   // How many people (browser tabs) are on this board, as reported by the server.
@@ -118,10 +146,18 @@ export function useBoard(boardId, { laser } = {}) {
       }
       case 'stroke': {
         const { stroke } = message;
-        if (!stroke?.id || removedIds.current.has(stroke.id)) return;
+        if (!stroke?.id || !Array.isArray(stroke.points) || removedIds.current.has(stroke.id)) return;
         closedIds.current.add(stroke.id);
         setRemoteLive((prev) => withoutKey(prev, stroke.id));
-        setStrokes((prev) => (prev.some((s) => s.id === stroke.id) ? prev : [...prev, stroke]));
+        // A line we already have was moved by someone: replace it in place
+        // (same position in the drawing order).
+        setStrokes((prev) => {
+          const index = prev.findIndex((s) => s.id === stroke.id);
+          if (index === -1) return [...prev, stroke];
+          const next = [...prev];
+          next[index] = stroke;
+          return next;
+        });
         break;
       }
       case 'remove': {
@@ -135,7 +171,7 @@ export function useBoard(boardId, { laser } = {}) {
       }
       case 'clear': {
         setStrokes([]);
-        setMyStrokeIds([]);
+        resetHistory();
         setRemoteLive({});
         break;
       }
@@ -147,9 +183,29 @@ export function useBoard(boardId, { laser } = {}) {
         // Unknown message (e.g. an error notice from AWS): ignore it.
         break;
     }
-  }, [noteActivity]);
+  }, [noteActivity, resetHistory]);
 
   const { status, send } = useBoardSocket(boardId, handleMessage);
+
+  // Paced queue for bulk changes (moving/deleting/restoring many lines).
+  const queueRef = useRef([]);
+  const queueTimerRef = useRef(0);
+  const enqueue = useCallback(
+    (messages) => {
+      queueRef.current.push(...messages);
+      if (queueTimerRef.current) return;
+      queueTimerRef.current = setInterval(() => {
+        const next = queueRef.current.shift();
+        if (next) send(next);
+        if (queueRef.current.length === 0) {
+          clearInterval(queueTimerRef.current);
+          queueTimerRef.current = 0;
+        }
+      }, BULK_SEND_INTERVAL_MS);
+    },
+    [send],
+  );
+  useEffect(() => () => clearInterval(queueTimerRef.current), []);
 
   // Forget people who stopped moving (checked twice a second while anyone is active).
   useEffect(() => {
@@ -182,27 +238,99 @@ export function useBoard(boardId, { laser } = {}) {
     (stroke) => {
       closedIds.current.add(stroke.id);
       setStrokes((prev) => [...prev, stroke]);
-      setMyStrokeIds((prev) => [...prev, stroke.id]);
+      pushHistory({ kind: 'add', id: stroke.id });
       send({ type: 'stroke', stroke });
     },
-    [send],
+    [pushHistory, send],
   );
 
+  // --- Select tool: move and delete lines (anyone's), synced to everyone ---
+
+  // Saves and shares new versions of lines that keep their ids.
+  const replaceStrokes = useCallback(
+    (updated) => {
+      if (updated.length === 0) return;
+      const map = new Map(updated.map((s) => [s.id, s]));
+      setStrokes((prev) => prev.map((s) => map.get(s.id) ?? s));
+      enqueue(updated.map((stroke) => ({ type: 'stroke', stroke })));
+    },
+    [enqueue],
+  );
+
+  // Removes lines for everyone and returns the lines that were removed.
+  const removeStrokes = useCallback(
+    (ids) => {
+      const idSet = new Set(ids);
+      const removed = strokesRef.current.filter((s) => idSet.has(s.id));
+      if (removed.length === 0) return removed;
+      for (const s of removed) {
+        closedIds.current.add(s.id);
+        removedIds.current.add(s.id);
+      }
+      setStrokes((prev) => prev.filter((s) => !idSet.has(s.id)));
+      enqueue(removed.map((s) => ({ type: 'remove', strokeId: s.id })));
+      return removed;
+    },
+    [enqueue],
+  );
+
+  // `transform(stroke)` returns the moved version of a line.
+  const moveStrokes = useCallback(
+    (ids, transform) => {
+      const idSet = new Set(ids);
+      const before = strokesRef.current.filter((s) => idSet.has(s.id));
+      if (before.length === 0) return;
+      replaceStrokes(before.map(transform));
+      pushHistory({ kind: 'move', before });
+    },
+    [pushHistory, replaceStrokes],
+  );
+
+  const deleteStrokes = useCallback(
+    (ids) => {
+      const removed = removeStrokes(ids);
+      if (removed.length > 0) pushHistory({ kind: 'delete', strokes: removed });
+    },
+    [pushHistory, removeStrokes],
+  );
+
+  // Undo your last action. Skips actions whose lines someone else has since
+  // removed (there is nothing left to undo for those).
   const undo = useCallback(() => {
-    if (myStrokeIds.length === 0) return;
-    const lastId = myStrokeIds[myStrokeIds.length - 1];
-    removedIds.current.add(lastId);
-    setMyStrokeIds((prev) => prev.slice(0, -1));
-    setStrokes((prev) => prev.filter((s) => s.id !== lastId));
-    send({ type: 'remove', strokeId: lastId });
-  }, [myStrokeIds, send]);
+    while (historyRef.current.length > 0) {
+      const action = historyRef.current.at(-1);
+      historyRef.current = historyRef.current.slice(0, -1);
+      setHistorySize(historyRef.current.length);
+      const present = new Set(strokesRef.current.map((s) => s.id));
+
+      if (action.kind === 'add') {
+        if (!present.has(action.id)) continue;
+        removeStrokes([action.id]);
+        return;
+      }
+      if (action.kind === 'move') {
+        const back = action.before.filter((s) => present.has(s.id));
+        if (back.length === 0) continue;
+        replaceStrokes(back);
+        return;
+      }
+      if (action.kind === 'delete') {
+        const restored = action.strokes.map((s) => ({ ...s, id: restoredId(s.id) }));
+        for (const s of restored) closedIds.current.add(s.id);
+        setStrokes((prev) => [...prev, ...restored].sort(byId));
+        enqueue(restored.map((stroke) => ({ type: 'stroke', stroke })));
+        return;
+      }
+    }
+  }, [enqueue, removeStrokes, replaceStrokes]);
 
   const clear = useCallback(() => {
+    queueRef.current = []; // don't let queued changes re-add lines after the clear
     setStrokes([]);
-    setMyStrokeIds([]);
+    resetHistory();
     setRemoteLive({});
     send({ type: 'clear' });
-  }, [send]);
+  }, [resetHistory, send]);
 
   return {
     strokes,
@@ -214,8 +342,10 @@ export function useBoard(boardId, { laser } = {}) {
     activePeople: status === 'online' ? activePeople : [],
     addStroke,
     sendProgress,
+    moveStrokes,
+    deleteStrokes,
     undo,
     clear,
-    canUndo: myStrokeIds.length > 0,
+    canUndo: historySize > 0,
   };
 }

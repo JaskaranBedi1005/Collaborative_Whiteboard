@@ -1,6 +1,6 @@
 import { LASER_COLOR } from '../lib/laser.js';
 import { displayColor } from '../lib/theme.js';
-import { EraserIcon, LaserIcon, PenIcon, TrashIcon, UndoIcon } from './icons.jsx';
+import { EraserIcon, LaserIcon, PenIcon, SelectIcon, TrashIcon, UndoIcon } from './icons.jsx';
 
 export const COLORS = [
   { value: '#1f2937', name: 'Ink' },
@@ -42,6 +42,16 @@ export default function ToolDock({
   return (
     <nav className="dock panel" aria-label="Drawing tools">
       <div className="dock-group" role="group" aria-label="Tool">
+        <button
+          type="button"
+          className={`tool-button ${tool === 'select' ? 'is-active' : ''}`}
+          aria-pressed={tool === 'select'}
+          aria-label="Select"
+          data-tooltip="Select, move, delete · V"
+          onClick={() => onToolChange('select')}
+        >
+          <SelectIcon />
+        </button>
         <button
           type="button"
           className={`tool-button ${tool === 'pen' ? 'is-active' : ''}`}
@@ -123,10 +133,10 @@ export default function ToolDock({
           max="30"
           value={size}
           onChange={(e) => onSizeChange(Number(e.target.value))}
-          disabled={isLaser}
+          disabled={isLaser || tool === 'select'}
           aria-label="Brush size"
           aria-valuetext={`${size} pixels`}
-          title={isLaser ? 'The laser pointer has a fixed size' : `Size ${size} · [ and ] change it`}
+          title={isLaser ? 'The laser pointer has a fixed size' : tool === 'select' ? 'Size is for drawing tools' : `Size ${size} · [ and ] change it`}
         />
       </div>
 
